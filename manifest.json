@@ -1,0 +1,41 @@
+{
+    "manifest_version": 3,
+    "name": "Moodle Finder",
+    "version": "0.1.0",
+    "description": "Search and organise your Moodle content.",
+    
+    "permissions": [
+      "sidePanel",
+      "storage",
+      "activeTab"
+    ],
+  
+    "host_permissions": [
+      "https://learning.monash.edu/*",
+      "http://127.0.0.1:8765/*"
+    ],
+  
+    "background": {
+      "service_worker": "background.js"
+    },
+  
+    "action": {
+      "default_title": "Open Moodle Finder"
+    },
+  
+    "side_panel": {
+      "default_path": "sidepanel.html"
+    },
+  
+    "content_scripts": [
+      {
+        "matches": [
+          "https://learning.monash.edu/*"
+        ],
+        "js": [
+          "content.js"
+        ],
+        "run_at": "document_idle"
+      }
+    ]
+  }
