@@ -177,7 +177,9 @@ def finish_sync(request: FinishRequest):
 
     conn = db.connect()
     try:
-        removed = prune(conn, request.unit_code, request.scopes, request.seen)
+        removed = db.retry_if_locked(prune)(
+            conn, request.unit_code, request.scopes, request.seen
+        )
     finally:
         conn.close()
 

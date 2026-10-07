@@ -43,6 +43,9 @@ CONTEXT_TOKENS = 48
 # and the constant in reciprocal rank fusion (score = sum of 1 / (RRF_K + rank)).
 SEARCH_CANDIDATES = 50
 RRF_K = 60
+# At most this many chunks of one document in a result list, so one long file
+# cannot crowd out the others.
+SEARCH_MAX_PER_DOC = 2
 
 # A scan that finds fewer than this share of the unit's previous scan is treated
 # as incomplete, and nothing is removed on the strength of it.
@@ -56,6 +59,7 @@ def setup_logging() -> None:
         format="%(asctime)s  %(message)s",
         datefmt="%H:%M:%S",
         stream=sys.stderr,
+        force=True,  # replace any handler a library installed first
     )
     # Libraries that log every HTTP request or model detail at INFO.
     for noisy in ("httpx", "huggingface_hub", "sentence_transformers", "transformers"):

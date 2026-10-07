@@ -91,15 +91,19 @@ def search(
         for rank, chunk_id in enumerate(ids, start=1):
             scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (config.RRF_K + rank)
             ranks.setdefault(chunk_id, {})[name] = rank
-    top = sorted(scores, key=scores.get, reverse=True)[:k]
-
     results = []
-    for chunk_id in top:
+    per_doc: dict[int, int] = {}
+    for chunk_id in sorted(scores, key=scores.get, reverse=True):
+        if len(results) == k:
+            break
         row = conn.execute(
             "SELECT c.id, c.doc_id, c.page_start, c.page_end, c.text, d.title, d.filename,"
             " d.file_type FROM chunks c JOIN documents d ON d.id = c.doc_id WHERE c.id = ?",
             (chunk_id,),
         ).fetchone()
+        if per_doc.get(row["doc_id"], 0) >= config.SEARCH_MAX_PER_DOC:
+            continue
+        per_doc[row["doc_id"]] = per_doc.get(row["doc_id"], 0) + 1
         locations = [
             dict(location)
             for location in conn.execute(
@@ -111,6 +115,7 @@ def search(
         results.append(
             {
                 "citation": citation(row, locations),
+                "pages": _pages(row["file_type"], row["page_start"], row["page_end"]),
                 "doc_id": row["doc_id"],
                 "title": row["title"],
                 "filename": row["filename"],
