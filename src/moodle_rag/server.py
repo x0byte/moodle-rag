@@ -210,6 +210,23 @@ def finish_sync(request: FinishRequest):
     return {"removed": removed}
 
 
+class StoppedRequest(BaseModel):
+    unit_code: str
+    reason: str
+    counts: dict[str, int] = {}
+
+
+@app.post("/sync/stopped")
+def stopped_sync(request: StoppedRequest):
+    """A sync that gave up early, e.g. because the Moodle session expired."""
+    done = ", ".join(f"{count} {state}" for state, count in request.counts.items())
+    log.warning(
+        "sync stopped %s: %s  (%s; nothing removed)",
+        safe_name(request.unit_code.upper(), "UNKNOWN"), request.reason, done or "nothing synced",
+    )
+    return {"status": "ok"}
+
+
 @app.get("/documents")
 def documents(unit: str | None = None):
     """Each document once, with every place it appears."""
