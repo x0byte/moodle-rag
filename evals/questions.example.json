@@ -1,0 +1,24 @@
+[
+  {
+    "question": "what did the week 6 lecture say about two-phase commit?",
+    "expected": [
+      "Week 6 Lecture"
+    ]
+  },
+  {
+    "question": "how many marks is the group report worth",
+    "unit": "FIT0000",
+    "expected": [
+      "Assignment 2 specification",
+      "Assessment Schedule"
+    ]
+  },
+  {
+    "question": "what do I have to do before the lab this week",
+    "unit": "FIT0000",
+    "week": 4,
+    "expected": [
+      "Section notes: Week 4"
+    ]
+  }
+]

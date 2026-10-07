@@ -1,9 +1,11 @@
-"""Command line: search the index, or rebuild it."""
+"""Command line: search the index, rebuild it, or evaluate retrieval."""
 
 import argparse
 import textwrap
 
-from . import config, db, embed
+from pathlib import Path
+
+from . import config, db, embed, evaluate
 from .ingest import reindex
 from .search import search
 
@@ -49,6 +51,18 @@ def main() -> None:
         "--extract", action="store_true", help="extract text again from the raw files first"
     )
     rebuild.set_defaults(run=lambda args: _reindex(args.extract))
+
+    check = commands.add_parser(
+        "eval", help="check that each question's expected source is in the top results"
+    )
+    check.add_argument(
+        "file",
+        nargs="?",
+        type=Path,
+        default=config.DATA_DIR / "eval-questions.json",
+        help="questions file (default: data/eval-questions.json; format: evals/questions.example.json)",
+    )
+    check.set_defaults(run=lambda args: evaluate.run(args.file))
 
     args = parser.parse_args()
     config.setup_logging()

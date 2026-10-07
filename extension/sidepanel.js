@@ -22,6 +22,7 @@ const STATE_LABELS = {
   skipped: "skipped",
   notext: "no text",
   failed: "failed",
+  stopped: "not synced",
   removed: "removed from Moodle"
 };
 
@@ -196,7 +197,12 @@ syncButton.addEventListener("click", async () => {
 
   } catch (error) {
     console.error(error);
-    status.innerText = error.message;
+    progress.hidden = true;
+    // A sync that stopped early (e.g. the Moodle session expired) says how far it got.
+    status.innerText =
+      error.synced === undefined
+        ? error.message
+        : `${error.message} ${error.synced} items were synced first; nothing was removed.`;
   } finally {
     setBusy(false);
   }

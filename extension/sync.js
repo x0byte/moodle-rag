@@ -39,6 +39,32 @@ globalThis.MoodleSync = (() => {
 
   const VIDEO_EXTENSIONS = new Set(["mp4", "m4v", "mov", "webm", "mkv", "avi", "wmv"]);
 
+  // Thrown when Moodle itself can no longer be read (session expired, or
+  // offline). The whole sync stops: nothing is reported as failed or removed.
+  class SyncStopped extends Error {}
+
+  const SESSION_EXPIRED = "Your Moodle session has expired. Log in to Moodle again, then sync.";
+
+  // Asks Moodle for a page that needs a login, without following redirects.
+  // Returns why Moodle cannot be read, or null if the session is fine.
+  async function moodleProblem() {
+    try {
+      const response = await fetch(`https://${MOODLE_HOST}/my/`, {
+        credentials: "include",
+        redirect: "manual"
+      });
+      if (response.ok) {
+        return null;
+      }
+      // Logged out, Moodle redirects to the login page.
+      return response.type === "opaqueredirect" || [401, 403].includes(response.status)
+        ? SESSION_EXPIRED
+        : `Moodle is not responding (HTTP ${response.status}). Try again later.`;
+    } catch {
+      return "Can't reach Moodle. Check your connection, then sync again.";
+    }
+  }
+
   // Server statuses that mean the file has been dealt with.
   const DONE = new Set(["ok", "no_text"]);
 
@@ -120,14 +146,22 @@ globalThis.MoodleSync = (() => {
     let response;
     try {
       response = await fetch(url, { credentials: "include", redirect: "follow", signal });
-    } catch {
-      // A redirect to a host outside host_permissions (single sign-on, or a
-      // file host not listed in FILE_HOSTS) is blocked by the browser.
-      throw new Error("download blocked (not logged in to Moodle, or unknown file host)");
+    } catch (error) {
+      if (signal?.aborted) {
+        throw error;
+      }
+      // The browser blocks a redirect to a host outside host_permissions.
+      // That is either the single sign-on page (session expired) or a file
+      // host missing from FILE_HOSTS; asking Moodle tells them apart.
+      const problem = await moodleProblem();
+      if (problem) {
+        throw new SyncStopped(problem);
+      }
+      throw new Error("download blocked (file host not in the extension's host permissions)");
     }
     const final = new URL(response.url);
     if (final.hostname === MOODLE_HOST && final.pathname.startsWith("/login/")) {
-      throw new Error("not logged in to Moodle");
+      throw new SyncStopped(SESSION_EXPIRED);
     }
     if (final.hostname !== MOODLE_HOST && !FILE_HOSTS.has(final.hostname)) {
       throw new Error(`unexpected host ${final.hostname}`);
@@ -223,13 +257,18 @@ globalThis.MoodleSync = (() => {
     scan.pageErrors = [];
     let next = 0;
     let done = 0;
+    let stopped = null;
     async function worker() {
-      while (next < pages.length) {
+      while (!stopped && next < pages.length) {
         const index = next++;
         try {
           const doc = await fetchDocument(pages[index]);
           results[index] = MoodleScan.scanPage(doc, pages[index], scan.sectionPaths);
         } catch (error) {
+          if (error instanceof SyncStopped) {
+            stopped = error;
+            return;
+          }
           // A page that could not be read is left out of the scan's scopes,
           // so nothing found on it earlier is treated as removed.
           scan.pageErrors.push(`${pages[index]}: ${error.message}`);
@@ -238,6 +277,10 @@ globalThis.MoodleSync = (() => {
       }
     }
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+    if (stopped) {
+      await reportStopped(scan, stopped.message, {});
+      throw stopped;
+    }
     // Merged in page order, so the result does not depend on download timing.
     for (const page of results) {
       if (page) {
@@ -245,6 +288,19 @@ globalThis.MoodleSync = (() => {
       }
     }
     return scan;
+  }
+
+  // Lets the server log that a sync stopped early. Best effort.
+  async function reportStopped(scan, reason, counts) {
+    try {
+      await fetch(`${SERVER}/sync/stopped`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ unit_code: scan.course.unitCode, reason, counts })
+      });
+    } catch {
+      // The panel shows the reason either way.
+    }
   }
 
   // Decides what a resource is before downloading it: activity type, then the
@@ -299,6 +355,9 @@ globalThis.MoodleSync = (() => {
       const name = /\.[a-z0-9]{1,5}$/i.test(file.name) ? file.name : `${resource.title}.${file.type}`;
       return outcome(await upload(blob, name, resource, context.course, file.resolved));
     } catch (error) {
+      if (error instanceof SyncStopped) {
+        throw error;
+      }
       return { state: "failed", detail: error.message };
     } finally {
       controller.abort(); // cancels the download if the body was never read
@@ -316,13 +375,25 @@ globalThis.MoodleSync = (() => {
 
     const counts = {};
     const notIngested = { skipped: [], failed: [] };
+    const finished = new Set();
     let next = 0;
+    let stopped = null;
     async function worker() {
-      while (next < scan.resources.length) {
+      while (!stopped && next < scan.resources.length) {
         const index = next++;
-        const result = await syncResource(scan.resources[index], context, (update) =>
-          onUpdate(index, update, false)
-        );
+        let result;
+        try {
+          result = await syncResource(scan.resources[index], context, (update) =>
+            onUpdate(index, update, false)
+          );
+        } catch (error) {
+          if (!(error instanceof SyncStopped)) {
+            throw error;
+          }
+          stopped = error;
+          return;
+        }
+        finished.add(index);
         counts[result.state] = (counts[result.state] || 0) + 1;
         notIngested[result.state]?.push({
           title: scan.resources[index].title,
@@ -334,6 +405,19 @@ globalThis.MoodleSync = (() => {
       }
     }
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+
+    if (stopped) {
+      // Whatever was not reached is neither failed nor gone; it is simply not
+      // synced yet. The server is not asked to remove anything.
+      scan.resources.forEach((resource, index) => {
+        if (!finished.has(index)) {
+          onUpdate(index, { state: "stopped", detail: "not synced" }, false);
+        }
+      });
+      await reportStopped(scan, stopped.message, counts);
+      stopped.synced = finished.size;
+      throw stopped;
+    }
 
     // Tell the server what was not sent (for its log) and what this scan
     // covered, so it can drop resources that have been removed from Moodle.
