@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import config
 from .extract import EXTRACTORS, detect_file_type
+from .index import index_document
 
 log = logging.getLogger("moodle_rag.ingest")
 
@@ -41,6 +42,7 @@ class Result:
     action: str  # created | updated | linked | unchanged
     status: str  # ok | no_text | unsupported | error
     pages: int = 0
+    chunks: int = 0
     detail: str | None = None
     # Other places the same file appears, e.g. ["Week 3: Replication"].
     also_in: list[str] = field(default_factory=list)
@@ -117,6 +119,8 @@ def _ingest(conn, upload_path, sha256, filename, content_type, meta) -> Result:
     previous_doc_id = location["doc_id"] if location else None
     doc = conn.execute("SELECT * FROM documents WHERE sha256 = ?", (sha256,)).fetchone()
 
+    extracted = False
+    chunk_count = 0
     with conn:
         # A known file that was skipped as unsupported (or failed) gets another
         # go once an extractor for its type exists.
@@ -125,6 +129,7 @@ def _ingest(conn, upload_path, sha256, filename, content_type, meta) -> Result:
             page_count = doc["page_count"]
             action = "unchanged" if previous_doc_id == doc_id else "linked"
         else:
+            extracted = True
             pages, page_count, status, detail = _extract(
                 extractor, upload_path, file_type, filename
             )
@@ -209,6 +214,10 @@ def _ingest(conn, upload_path, sha256, filename, content_type, meta) -> Result:
             },
         )
 
+        # After the location is stored: a chunk's context names its unit and section.
+        if extracted:
+            chunk_count = index_document(conn, doc_id)
+
         # This URL used to point at a different document; drop it if nothing else does.
         if previous_doc_id is not None and previous_doc_id != doc_id:
             remaining = conn.execute(
@@ -232,7 +241,7 @@ def _ingest(conn, upload_path, sha256, filename, content_type, meta) -> Result:
         log.info("linked %s: same file as doc %d (%s)", name, doc_id, "; ".join(also_in))
     elif status == "ok":
         verb = "re-ingested" if action == "updated" else "ingested"
-        log.info("%s %s: %d pages", verb, name, page_count)
+        log.info("%s %s: %d pages, %d chunks", verb, name, page_count, chunk_count)
     elif status == "no_text":
         log.warning("no text extracted %s: %d pages, %s", name, page_count, detail)
     elif status == "unsupported":
@@ -240,7 +249,40 @@ def _ingest(conn, upload_path, sha256, filename, content_type, meta) -> Result:
     else:
         log.error("failed %s: %s", name, detail)
     pages_stored = page_count if status == "ok" else 0
-    return Result(doc_id, action, status, pages_stored, detail, also_in)
+    return Result(doc_id, action, status, pages_stored, chunk_count, detail, also_in)
+
+
+def reindex(conn: sqlite3.Connection, extract: bool = False) -> None:
+    """Rebuild the search index for every document.
+
+    With extract=True the text is first extracted again from the raw files,
+    which picks up extractor improvements without another sync.
+    """
+    docs = conn.execute("SELECT * FROM documents ORDER BY id").fetchall()
+    total = 0
+    for doc in docs:
+        raw = config.DATA_DIR / doc["raw_path"] if doc["raw_path"] else None
+        with _lock, conn:
+            if extract and raw and raw.exists() and doc["file_type"] in EXTRACTORS:
+                pages, page_count, status, detail = _extract(
+                    EXTRACTORS[doc["file_type"]], raw, doc["file_type"], doc["filename"]
+                )
+                conn.execute(
+                    "UPDATE documents SET status = ?, status_detail = ?, page_count = ?"
+                    " WHERE id = ?",
+                    (status, detail, page_count, doc["id"]),
+                )
+                conn.execute("DELETE FROM pages WHERE doc_id = ?", (doc["id"],))
+                conn.executemany(
+                    "INSERT INTO pages (doc_id, page_no, text) VALUES (?, ?, ?)",
+                    [(doc["id"], page.number, page.text) for page in pages],
+                )
+                if status != doc["status"]:
+                    log.info("%s: %s -> %s", doc["filename"], doc["status"], status)
+            chunks = index_document(conn, doc["id"])
+        total += chunks
+        log.info("indexed %s: %d chunks", doc["filename"], chunks)
+    log.info("reindexed %d documents: %d chunks", len(docs), total)
 
 
 def prune(conn: sqlite3.Connection, unit_code: str, scopes: list[str], seen: list[str]) -> list[str]:

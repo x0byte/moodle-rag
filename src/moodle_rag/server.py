@@ -16,7 +16,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from . import config, db
+from . import config, db, embed
 from .extract import EXTRACTORS
 from .ingest import Metadata, ingest_file, parse_week, prune, safe_name
 
@@ -255,6 +255,7 @@ def main() -> None:
         conn.close()
         log.info("baseline reset for %s" if cleared else "no baseline recorded for %s", unit)
         return
+    embed.model()  # load now, so the first upload of a sync is not slow
     log.info("ingest server on http://%s:%d", config.HOST, config.PORT)
     log.info("database: %s", config.DB_PATH)
     uvicorn.run(app, host=config.HOST, port=config.PORT, log_level="warning")

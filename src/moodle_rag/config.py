@@ -32,6 +32,18 @@ ALLOWED_ORIGINS = [
 # (for a PDF: scanned, no text layer).
 MIN_TEXT_CHARS = 20
 
+# Embeddings run locally. bge-small reads at most 512 tokens, so a chunk plus
+# its context line has to stay under that.
+EMBEDDING_MODEL = os.environ.get("MOODLE_RAG_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+CHUNK_TOKENS = 450
+CHUNK_OVERLAP_TOKENS = 60
+CONTEXT_TOKENS = 48
+
+# Hybrid search: how many candidates each of BM25 and vector search contributes,
+# and the constant in reciprocal rank fusion (score = sum of 1 / (RRF_K + rank)).
+SEARCH_CANDIDATES = 50
+RRF_K = 60
+
 # A scan that finds fewer than this share of the unit's previous scan is treated
 # as incomplete, and nothing is removed on the strength of it.
 PRUNE_MIN_RATIO = 0.7
@@ -45,3 +57,6 @@ def setup_logging() -> None:
         datefmt="%H:%M:%S",
         stream=sys.stderr,
     )
+    # Libraries that log every HTTP request or model detail at INFO.
+    for noisy in ("httpx", "huggingface_hub", "sentence_transformers", "transformers"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)

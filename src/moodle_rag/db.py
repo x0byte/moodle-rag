@@ -9,11 +9,13 @@ import logging
 import sqlite3
 from pathlib import Path
 
+import sqlite_vec
+
 from . import config
 
 log = logging.getLogger("moodle_rag.db")
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 DOCUMENTS = """
 CREATE TABLE IF NOT EXISTS {name} (
@@ -64,6 +66,34 @@ CREATE TABLE IF NOT EXISTS pages (
     text    TEXT NOT NULL,
     PRIMARY KEY (doc_id, page_no)
 );
+
+-- Search index. Vectors are float32 blobs compared with sqlite-vec's
+-- vec_distance_cosine; chunks_fts mirrors chunks through the triggers below.
+CREATE TABLE IF NOT EXISTS chunks (
+    id         INTEGER PRIMARY KEY,
+    doc_id     INTEGER NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    seq        INTEGER NOT NULL,          -- position within the document
+    page_start INTEGER NOT NULL,
+    page_end   INTEGER NOT NULL,
+    text       TEXT NOT NULL,
+    context    TEXT NOT NULL,             -- unit | section | title | filename
+    tokens     INTEGER NOT NULL,
+    embedding  BLOB NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks (doc_id, seq);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5 (
+    text, title, tokenize = 'porter unicode61 remove_diacritics 2'
+);
+
+CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
+    INSERT INTO chunks_fts (rowid, text, title) VALUES (new.id, new.text, new.context);
+END;
+
+CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
+    DELETE FROM chunks_fts WHERE rowid = old.id;
+END;
 """
 
 # v1 kept the location columns on documents, one document per URL. Split them
@@ -111,6 +141,9 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
     return conn
 
 
