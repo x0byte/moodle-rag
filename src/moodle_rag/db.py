@@ -5,8 +5,10 @@ linked from several places (two weeks, a folder and a section) is one document
 with several locations. Each document has one row per extracted page/slide.
 """
 
+import functools
 import logging
 import sqlite3
+import time
 from pathlib import Path
 
 import sqlite_vec
@@ -134,12 +136,41 @@ DROP TABLE locations_v2;
 """
 
 
-def connect(path: Path | None = None) -> sqlite3.Connection:
+def retry_if_locked(function):
+    """Run a database operation again if another process briefly holds the lock.
+
+    The ingest server and the MCP server share one database. WAL mode lets
+    searches read while a sync writes, and the connection already waits for
+    locks (see connect); this covers what is left, such as a checkpoint or a
+    schema change landing between two statements.
+    """
+
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+        for attempt in range(5):
+            try:
+                return function(*args, **kwargs)
+            except sqlite3.OperationalError as error:
+                if "locked" not in str(error) and "busy" not in str(error) or attempt == 4:
+                    raise
+                log.warning("database busy, retrying (%d/4)", attempt + 1)
+                time.sleep(0.25 * 2**attempt)
+
+    return wrapper
+
+
+def connect(path: Path | None = None, read_only: bool = False) -> sqlite3.Connection:
     path = path or config.DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=30)
+    # timeout: wait up to 15 s for another process's lock before giving up.
+    conn = sqlite3.connect(path, timeout=15)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL")
+    if read_only:
+        conn.execute("PRAGMA query_only = ON")
+    else:
+        # WAL: readers never block the writer, nor the writer them. The mode is
+        # stored in the database file, so it only needs setting by a writer.
+        conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)

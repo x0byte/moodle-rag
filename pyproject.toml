@@ -15,11 +15,13 @@ dependencies = [
     "sentence-transformers>=3",
     "sqlite-vec>=0.1.6",
     "numpy>=1.26",
+    "mcp>=2",
 ]
 
 [project.scripts]
 moodle-ingest = "moodle_rag.server:main"
 moodle-rag = "moodle_rag.cli:main"
+moodle-mcp = "moodle_rag.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]
