@@ -1,18 +1,20 @@
 {
     "manifest_version": 3,
     "name": "Moodle Finder",
-    "version": "0.1.0",
+    "version": "0.4.0",
     "description": "Search and organise your Moodle content.",
     "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA+ni45ShXThQZPIMpTDig4PdpI7ticSAEs2gZD9FI5ROoxDtx3lc24RlP+Cvxfb4RA19p+JYlMv4dz92/2LseTOI26zk8BCBDSPoX7bOzauFjdKp9LeK7fEBDTwp++GuHsH2imhID3LJYQlTTpHPTje2hRwW56egE80LaIMIHbxBdMCDCXMRR+EsyFBBeJorplHZemhmUWunS/UB3OVnwKLKb9tZP3yz5Av8BG9fjnJDJXcfa7GHwuaPFwIjhs3DaCU008sUIRsVMK9t4FBo4cUDA9kGsLl9wQCHEvvzZBSumOqPl7TaiybeWPOQqvx5VGLDcz/MPE3MIMpbNs1DWkwIDAQAB",
 
     "permissions": [
       "sidePanel",
       "storage",
-      "activeTab"
+      "activeTab",
+      "scripting"
     ],
   
     "host_permissions": [
       "https://learning.monash.edu/*",
+      "https://d25zr1xy094zys.cloudfront.net/*",
       "http://127.0.0.1:8765/*"
     ],
   
@@ -34,6 +36,7 @@
           "https://learning.monash.edu/*"
         ],
         "js": [
+          "scan.js",
           "content.js"
         ],
         "run_at": "document_idle"

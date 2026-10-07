@@ -61,11 +61,56 @@ body {
     font-weight: 600;
   }
   
-  .resource-url {
-    font-size: 11px;
+  
+  button.secondary {
+    background: #222;
+    color: #fff;
+    font-weight: 500;
+  }
+  
+  button:disabled {
     opacity: 0.5;
+    cursor: default;
+  }
   
+  progress {
+    width: 100%;
+    margin-top: 12px;
+  }
+  
+  #summary {
+    opacity: 0.6;
+    font-size: 13px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #333;
+  }
+  
+  .resource-section {
+    font-size: 12px;
+    opacity: 0.6;
+    margin-top: 3px;
+  }
+  
+  .resource-state {
+    font-size: 12px;
     margin-top: 5px;
+    color: #999;
+  }
   
-    word-break: break-all;
+  .resource[data-state="checking"] .resource-state,
+  .resource[data-state="downloading"] .resource-state {
+    color: #6cb6ff;
+  }
+  
+  .resource[data-state="ingested"] .resource-state,
+  .resource[data-state="linked"] .resource-state {
+    color: #56d364;
+  }
+  
+  .resource[data-state="notext"] .resource-state {
+    color: #e3b341;
+  }
+  
+  .resource[data-state="failed"] .resource-state {
+    color: #ff7b72;
   }

@@ -18,32 +18,23 @@
 
   <main>
 
-    <button id="scanButton">
+    <button id="syncButton">
+      Sync this course
+    </button>
+
+    <button id="scanButton" class="secondary">
       Scan current page
     </button>
 
     <div id="status"></div>
 
+    <progress id="progress" value="0" max="1" hidden></progress>
+
     <section id="results" hidden>
 
       <h2 id="courseTitle"></h2>
 
-      <div class="stat">
-        <span>Headings</span>
-        <strong id="headingCount">0</strong>
-      </div>
-
-      <div class="stat">
-        <span>Resources</span>
-        <strong id="resourceCount">0</strong>
-      </div>
-
-      <div class="stat">
-        <span>Files</span>
-        <strong id="fileCount">0</strong>
-      </div>
-
-      <h3>Resources found</h3>
+      <div id="summary"></div>
 
       <div id="resourceList"></div>
 
@@ -51,6 +42,8 @@
 
   </main>
 
+  <script src="scan.js"></script>
+  <script src="sync.js"></script>
   <script src="sidepanel.js"></script>
 
 </body>

@@ -1,24 +1,27 @@
-"""SQLite storage: one row per document, one row per extracted page/slide."""
+"""SQLite storage.
 
+A document is one distinct file, identified by its content hash. The same file
+linked from several places (two weeks, a folder and a section) is one document
+with several locations. Each document has one row per extracted page/slide.
+"""
+
+import logging
 import sqlite3
 from pathlib import Path
 
 from . import config
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS documents (
+log = logging.getLogger("moodle_rag.db")
+
+SCHEMA_VERSION = 4
+
+DOCUMENTS = """
+CREATE TABLE IF NOT EXISTS {name} (
     id            INTEGER PRIMARY KEY,
-    source_url    TEXT NOT NULL UNIQUE,   -- the Moodle link the file was found at
-    resolved_url  TEXT,                   -- where it actually downloaded from (pluginfile.php)
-    unit_code     TEXT NOT NULL,
-    unit_name     TEXT,
-    section       TEXT,                   -- section/topic title as shown on the course page
-    week          INTEGER,                -- parsed from the section title when it names a week
+    sha256        TEXT NOT NULL UNIQUE,
     title         TEXT NOT NULL,
-    resource_type TEXT,                   -- Moodle module type: resource, folder, page, ...
     filename      TEXT,
     file_type     TEXT,                   -- pdf, pptx, docx, html
-    sha256        TEXT NOT NULL,
     raw_path      TEXT,                   -- relative to the data dir; NULL if the file was not kept
     status        TEXT NOT NULL,          -- ok | no_text | unsupported | error
     status_detail TEXT,
@@ -26,8 +29,34 @@ CREATE TABLE IF NOT EXISTS documents (
     ingested_at   TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
+"""
 
-CREATE INDEX IF NOT EXISTS idx_documents_unit ON documents (unit_code, week);
+SCHEMA = DOCUMENTS.format(name="documents") + """
+CREATE TABLE IF NOT EXISTS locations (
+    id            INTEGER PRIMARY KEY,
+    doc_id        INTEGER NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    source_url    TEXT NOT NULL UNIQUE,   -- the Moodle link the file was found at
+    resolved_url  TEXT,                   -- where it actually downloaded from (pluginfile.php)
+    unit_code     TEXT NOT NULL,
+    unit_name     TEXT,
+    section       TEXT,                   -- section/topic title as shown on the course page
+    week          INTEGER,                -- parsed from the section title when it names a week
+    title         TEXT,                   -- the link's title in this location
+    resource_type TEXT,                   -- Moodle module type: resource, folder, page, ...
+    scope         TEXT,                   -- where a scan found it: 'index' or 'page:<path>'
+    first_seen    TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_locations_doc ON locations (doc_id);
+CREATE INDEX IF NOT EXISTS idx_locations_unit ON locations (unit_code, week);
+
+-- Size of the last accepted scan of each unit, to spot a scan that came up short.
+CREATE TABLE IF NOT EXISTS scans (
+    unit_code      TEXT PRIMARY KEY,
+    resource_count INTEGER NOT NULL,
+    finished_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 CREATE TABLE IF NOT EXISTS pages (
     doc_id  INTEGER NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
@@ -35,6 +64,43 @@ CREATE TABLE IF NOT EXISTS pages (
     text    TEXT NOT NULL,
     PRIMARY KEY (doc_id, page_no)
 );
+"""
+
+# v1 kept the location columns on documents, one document per URL. Split them
+# out, merging documents that share a content hash into the oldest one.
+MIGRATE_V1 = """
+PRAGMA foreign_keys = OFF;
+BEGIN;
+""" + DOCUMENTS.format(name="documents_v2") + """
+INSERT INTO documents_v2
+    (id, sha256, title, filename, file_type, raw_path, status, status_detail,
+     page_count, ingested_at, updated_at)
+SELECT id, sha256, title, filename, file_type, raw_path, status, status_detail,
+       page_count, ingested_at, updated_at
+FROM documents
+WHERE id IN (SELECT MIN(id) FROM documents GROUP BY sha256);
+
+CREATE TABLE locations_v2 AS
+SELECT (SELECT MIN(k.id) FROM documents k WHERE k.sha256 = d.sha256) AS doc_id,
+       d.source_url, d.resolved_url, d.unit_code, d.unit_name, d.section, d.week,
+       d.title, d.resource_type, d.ingested_at AS first_seen, d.updated_at AS last_seen
+FROM documents d;
+
+DELETE FROM pages WHERE doc_id NOT IN (SELECT id FROM documents_v2);
+DROP TABLE documents;
+ALTER TABLE documents_v2 RENAME TO documents;
+COMMIT;
+PRAGMA foreign_keys = ON;
+"""
+
+MIGRATE_V1_LOCATIONS = """
+INSERT INTO locations
+    (doc_id, source_url, resolved_url, unit_code, unit_name, section, week,
+     title, resource_type, first_seen, last_seen)
+SELECT doc_id, source_url, resolved_url, unit_code, unit_name, section, week,
+       title, resource_type, first_seen, last_seen
+FROM locations_v2;
+DROP TABLE locations_v2;
 """
 
 
@@ -51,6 +117,17 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
 def init(path: Path | None = None) -> None:
     conn = connect(path)
     try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(documents)")}
+        is_v1 = "source_url" in columns
+        if is_v1:
+            log.info("migrating database to schema v%d", SCHEMA_VERSION)
+            conn.executescript(MIGRATE_V1)
         conn.executescript(SCHEMA)
+        if is_v1:
+            conn.executescript(MIGRATE_V1_LOCATIONS)
+        if "scope" not in {row["name"] for row in conn.execute("PRAGMA table_info(locations)")}:
+            conn.execute("ALTER TABLE locations ADD COLUMN scope TEXT")  # v2 -> v3
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn.commit()
     finally:
         conn.close()

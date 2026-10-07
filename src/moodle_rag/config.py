@@ -8,7 +8,9 @@ from pathlib import Path
 # src/moodle_rag/config.py -> repo root (the project is installed editable by uv).
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-DATA_DIR = Path(os.environ.get("MOODLE_RAG_DATA", PROJECT_ROOT / "data")).resolve()
+# Anchored to the project root, never the current working directory, so the
+# ingest server and the MCP server always share one database.
+DATA_DIR = Path(os.environ.get("MOODLE_RAG_DATA_DIR") or PROJECT_ROOT / "data").expanduser().resolve()
 RAW_DIR = DATA_DIR / "raw"
 DB_PATH = DATA_DIR / "moodle.db"
 
@@ -26,8 +28,13 @@ ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 
-# A PDF with fewer non-whitespace characters than this is treated as scanned.
+# A file with fewer non-whitespace characters than this counts as having no text
+# (for a PDF: scanned, no text layer).
 MIN_TEXT_CHARS = 20
+
+# A scan that finds fewer than this share of the unit's previous scan is treated
+# as incomplete, and nothing is removed on the strength of it.
+PRUNE_MIN_RATIO = 0.7
 
 
 def setup_logging() -> None:

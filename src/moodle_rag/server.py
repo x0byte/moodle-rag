@@ -1,18 +1,24 @@
 """Local ingest server. Receives files from the browser extension."""
 
+import argparse
 import hashlib
+import json
 import logging
 import uuid
+from collections import Counter
 from dataclasses import asdict
+from datetime import datetime
 
 import uvicorn
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from . import config, db
-from .ingest import Metadata, ingest_file
+from .extract import EXTRACTORS
+from .ingest import Metadata, ingest_file, parse_week, prune, safe_name
 
 log = logging.getLogger("moodle_rag.server")
 
@@ -50,7 +56,34 @@ def health():
         count = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
     finally:
         conn.close()
-    return {"status": "ok", "documents": count}
+    # The extension only downloads file types listed here.
+    return {"status": "ok", "documents": count, "supported_types": sorted(EXTRACTORS)}
+
+
+class CheckRequest(BaseModel):
+    urls: list[str]
+
+
+@app.post("/check")
+def check(request: CheckRequest):
+    """What the server already holds for these Moodle links, so a sync can skip them."""
+    conn = db.connect()
+    try:
+        known = {}
+        # Chunked to stay under SQLite's bound-parameter limit.
+        for start in range(0, len(request.urls), 500):
+            urls = request.urls[start : start + 500]
+            rows = conn.execute(
+                "SELECT l.source_url, l.resolved_url, d.id AS doc_id, d.sha256, d.status"
+                " FROM locations l JOIN documents d ON d.id = l.doc_id"
+                f" WHERE l.source_url IN ({', '.join('?' * len(urls))})",
+                urls,
+            ).fetchall()
+            known.update({row["source_url"]: dict(row) for row in rows})
+    finally:
+        conn.close()
+    log.info("sync check: %d resources, %d already ingested", len(request.urls), len(known))
+    return {"known": known}
 
 
 @app.post("/ingest")
@@ -64,6 +97,7 @@ def ingest(
     week: int | None = Form(None),
     resolved_url: str | None = Form(None),
     resource_type: str | None = Form(None),
+    scope: str | None = Form(None),
 ):
     tmp_dir = config.RAW_DIR / ".tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -84,6 +118,7 @@ def ingest(
         week=week,
         resolved_url=resolved_url,
         resource_type=resource_type,
+        scope=scope,
     )
     conn = db.connect()
     try:
@@ -100,26 +135,128 @@ def ingest(
     return asdict(result)
 
 
-@app.get("/documents")
-def documents(unit: str | None = None):
+class NotIngested(BaseModel):
+    title: str
+    section: str = ""
+    url: str
+    reason: str
+
+
+class FinishRequest(BaseModel):
+    unit_code: str
+    scopes: list[str]
+    seen: list[str]
+    counts: dict[str, int] = {}
+    skipped: list[NotIngested] = []
+    failed: list[NotIngested] = []
+
+
+def _skip_summary(skipped: list[NotIngested]) -> str:
+    """'71 external links, 4 external tools, 2 video files' from the skip reasons."""
+    parts = []
+    for reason, count in Counter(item.reason for item in skipped).most_common():
+        if reason.endswith(" not supported"):
+            reason = f"{reason.removesuffix(' not supported')} file"
+        plural = "" if count == 1 or reason.endswith(("s", "yet")) else "s"
+        parts.append(f"{count} {reason}{plural}")
+    return ", ".join(parts)
+
+
+@app.post("/sync/finish")
+def finish_sync(request: FinishRequest):
+    """End of a sync: record what the extension did not send, then drop
+    resources the scan covered but no longer found."""
+    unit = safe_name(request.unit_code.upper(), "UNKNOWN")
+
+    if request.skipped:
+        log.info("skipped %s", _skip_summary(request.skipped))
+    for item in request.failed:
+        week = parse_week(item.section)
+        name = f"{unit}{f' W{week}' if week is not None else ''} {item.title}"
+        log.error("failed %s: %s (%s)", name, item.reason, item.url)
+
     conn = db.connect()
     try:
-        rows = conn.execute(
-            "SELECT id, unit_code, week, section, title, filename, file_type, status,"
-            " status_detail, page_count, sha256, source_url, resolved_url, updated_at"
-            " FROM documents WHERE (:unit IS NULL OR unit_code = upper(:unit))"
-            " ORDER BY unit_code, week, title",
-            {"unit": unit},
-        ).fetchall()
+        removed = prune(conn, request.unit_code, request.scopes, request.seen)
     finally:
         conn.close()
-    return [dict(row) for row in rows]
+
+    counts = dict(request.counts)
+    if removed:
+        counts["removed"] = len(removed)
+
+    # The terminal gets one line per kind of skip; the full list goes here.
+    report = config.DATA_DIR / f"sync-report-{unit}.json"
+    report.write_text(
+        json.dumps(
+            {
+                "unit": unit,
+                "finished_at": datetime.now().isoformat(timespec="seconds"),
+                "counts": counts,
+                "failed": [item.model_dump() for item in request.failed],
+                "skipped": [item.model_dump() for item in request.skipped],
+                "removed": removed,
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    summary = ", ".join(f"{count} {state}" for state, count in counts.items())
+    log.info("sync finished %s: %s  (details: %s)", unit, summary or "nothing to do", report.name)
+    return {"removed": removed}
+
+
+@app.get("/documents")
+def documents(unit: str | None = None):
+    """Each document once, with every place it appears."""
+    conn = db.connect()
+    try:
+        docs = {
+            row["id"]: {**dict(row), "locations": []}
+            for row in conn.execute(
+                "SELECT id, title, filename, file_type, status, status_detail, page_count,"
+                " sha256, updated_at FROM documents WHERE :unit IS NULL OR id IN"
+                " (SELECT doc_id FROM locations WHERE unit_code = upper(:unit))"
+                " ORDER BY id",
+                {"unit": unit},
+            )
+        }
+        for row in conn.execute(
+            "SELECT doc_id, unit_code, week, section, title, source_url, resolved_url"
+            " FROM locations ORDER BY unit_code, week, section"
+        ):
+            if row["doc_id"] in docs:
+                location = dict(row)
+                docs[location.pop("doc_id")]["locations"].append(location)
+    finally:
+        conn.close()
+    return list(docs.values())
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Moodle RAG ingest server")
+    parser.add_argument(
+        "--reset-baseline",
+        metavar="UNIT",
+        help="forget the size of UNIT's last scan, so its next sync may remove resources"
+        " even if it finds far fewer than before, then exit",
+    )
+    args = parser.parse_args()
+
     config.setup_logging()
     db.init()
-    log.info("ingest server on http://%s:%d  (data: %s)", config.HOST, config.PORT, config.DATA_DIR)
+    if args.reset_baseline:
+        unit = safe_name(args.reset_baseline.upper(), "UNKNOWN")
+        conn = db.connect()
+        with conn:
+            cleared = conn.execute("DELETE FROM scans WHERE unit_code = ?", (unit,)).rowcount
+        conn.close()
+        log.info("baseline reset for %s" if cleared else "no baseline recorded for %s", unit)
+        return
+    log.info("ingest server on http://%s:%d", config.HOST, config.PORT)
+    log.info("database: %s", config.DB_PATH)
     uvicorn.run(app, host=config.HOST, port=config.PORT, log_level="warning")
 
 
