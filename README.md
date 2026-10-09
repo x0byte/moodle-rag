@@ -124,7 +124,7 @@ uv run moodle-ingest --reset-baseline FIT5122
 
 ## Connecting Claude
 
-The MCP server reads the database directly, so the ingest server does not
+The MCP server reads the database, so the ingest server does not
 need to be running. Replace the paths with your own (`which uv`, and this
 repo's absolute path).
 
